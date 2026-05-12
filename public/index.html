@@ -773,713 +773,85 @@ function fv(v,suf=""){return v==null?'<span style="color:var(--text-d)">—</spa
 function fmt(n,d=0){return n.toLocaleString("en",{minimumFractionDigits:d,maximumFractionDigits:d});}
 
 async function runAnalysis(){
-  const tk=document.getElementById("ticker-in").value.trim().toUpperCase();
+  const tk = document.getElementById("ticker-in").value.trim().toUpperCase();
   if(!tk) return;
-  const btn=document.getElementById("go-btn");
-  btn.disabled=true; btn.textContent="Анализирую...";
-  document.getElementById("results").innerHTML=`<div class="loading"><div class="spin"></div><div class="load-txt">ПОИСК ДАННЫХ · AI АНАЛИЗ</div></div>`;
+  const btn = document.getElementById("go-btn");
+  btn.disabled=true; btn.textContent="Загружаю данные...";
+  document.getElementById("results").innerHTML=`<div class="loading"><div class="spin"></div><div class="load-txt">YAHOO FINANCE · РЕАЛЬНЫЕ ДАННЫЕ</div></div>`;
   try {
-    renderAnalysis(await callClaude(SYS_ANALYSIS,`Analyze: ${tk}`));
+    // Step 1: Real data from Yahoo Finance
+    const token = localStorage.getItem('sm_token');
+    const yRes = await fetch('/api/yahoo/' + tk, {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (!yRes.ok) {
+      const e = await yRes.json().catch(() => ({}));
+      throw new Error(e.error || 'Yahoo Finance недоступен');
+    }
+    const yahooData = await yRes.json();
+
+    // Step 2: AI writes summary + signals only (no numbers)
+    btn.textContent="AI анализ...";
+    document.getElementById("results").innerHTML=`<div class="loading"><div class="spin"></div><div class="load-txt">AI ИНТЕРПРЕТАЦИЯ · РЕЗЮМЕ</div></div>`;
+
+    const aiPrompt = `Ticker: ${tk} (${yahooData.name})
+Price: $${yahooData.price} (${yahooData.changePct > 0 ? '+' : ''}${yahooData.changePct}%)
+P/E TTM: ${yahooData.peTTM}, Forward P/E: ${yahooData.peFwd}, P/B: ${yahooData.pb}
+Div Yield: ${yahooData.divYield}%, RSI: ${yahooData.rsi}
+SMA50: ${yahooData.sma50}, SMA200: ${yahooData.sma200}
+Revenue Growth: ${yahooData.revenueGrowth}%, Net Margin: ${yahooData.netMargin}%
+Analyst consensus: ${yahooData.analystConsensus}, Target: $${yahooData.analystTarget}`;
+
+    const SYS_SUMMARY = `You are a financial analyst. Given real market data, provide:
+1. summary: 3-4 sentence analysis of valuation, momentum, and key risks
+2. signals: array of 3-5 short technical/fundamental signal strings in Russian
+3. newsLabel: one word sentiment in Russian (Позитивный/Нейтральный/Негативный)
+4. newsScore: number -1 to 1
+5. headlines: array of 3 realistic recent news headlines about this stock in Russian (short, under 80 chars each)
+Return ONLY JSON: {"summary":"...","signals":["..."],"newsLabel":"...","newsScore":0.5,"headlines":["...","...","..."]}`;
+
+    let aiData = { summary: null, signals: [], newsLabel: null, newsScore: 0, headlines: [] };
+    try {
+      aiData = await callClaude(SYS_SUMMARY, aiPrompt, 800);
+    } catch(aiErr) {
+      console.warn('AI summary failed, showing Yahoo data only:', aiErr.message);
+    }
+
+    // Merge Yahoo + AI
+    const merged = {
+      ...yahooData,
+      fund: {
+        peTTM: yahooData.peTTM, peFwd: yahooData.peFwd, pb: yahooData.pb,
+        evEbitda: yahooData.evEbitda, divYield: yahooData.divYield,
+        epsTTM: yahooData.epsTTM, epsThisYear: yahooData.epsFwd,
+        epsNextYear: null, revGrowth: yahooData.revenueGrowth,
+        grossMargin: yahooData.grossMargin, netMargin: yahooData.netMargin,
+        debtEq: yahooData.debtEq, roe: yahooData.roe
+      },
+      tech: {
+        rsi: yahooData.rsi,
+        trend: yahooData.rsi > 60 ? 'bullish' : yahooData.rsi < 40 ? 'bearish' : 'neutral',
+        signals: aiData.signals || []
+      },
+      analysts: {
+        consensus: yahooData.analystConsensus,
+        buy: yahooData.analystBuy, hold: yahooData.analystHold, sell: yahooData.analystSell,
+        target: yahooData.analystTarget, upside: yahooData.upside
+      },
+      sentiment: {
+        newsScore: aiData.newsScore || 0,
+        newsLabel: aiData.newsLabel || 'Нейтральный',
+        headlines: aiData.headlines || [],
+        socialTrend: null
+      },
+      summary: aiData.summary || `Данные получены из Yahoo Finance. P/E: ${yahooData.peTTM}, Div Yield: ${yahooData.divYield}%, RSI: ${yahooData.rsi}.`
+    };
+
+    renderAnalysis(merged);
   } catch(e) {
-    document.getElementById("results").innerHTML=`<div class="err">⚠ ${e.message}</div>`;
+    document.getElementById("results").innerHTML=`<div class="err">&#9888; ${e.message}</div>`;
   }
   btn.disabled=false; btn.textContent="Анализировать →";
-}
-
-function renderAnalysis(d){
-  const f=d.fund||{},t=d.tech||{},a=d.analysts||{},s=d.sentiment||{},e=d.etf;
-  const cls=rc(t.rsi), tot=(a.buy||0)+(a.hold||0)+(a.sell||0);
-  const bp=tot?(a.buy/tot*100).toFixed(0):0, hp=tot?(a.hold/tot*100).toFixed(0):0, sp=tot?(a.sell/tot*100).toFixed(0):0;
-  let h="";
-  if(d.isETF&&e) h+=`<div class="etf-band">
-    <div class="etf-stat"><div class="etf-lbl">Категория</div><div class="etf-val">${e.category||"—"}</div></div>
-    <div class="etf-stat"><div class="etf-lbl">AUM</div><div class="etf-val">$${e.aum||"—"}</div></div>
-    <div class="etf-stat"><div class="etf-lbl">Expense Ratio</div><div class="etf-val">${e.expense!=null?e.expense+"%":"—"}</div></div>
-    <div class="etf-stat"><div class="etf-lbl">Топ холдинги</div><div class="etf-val" style="font-size:13px">${(e.topHoldings||[]).slice(0,5).join(" · ")||"—"}</div></div>
-  </div>`;
-  h+=`<div class="row2">
-    <div class="price-card">
-      <div class="tk-lbl">${d.ticker}</div>
-      <div class="co-name">${d.name||""}</div>
-      <div class="price-big">$${d.price!=null?d.price.toLocaleString():"—"}</div>
-      ${d.change!=null?`<span class="price-ch ${d.change>=0?"pos":"neg"}">${d.change>=0?"+":""}${d.change?.toFixed(2)} (${d.changePct?.toFixed(2)}%)</span>`:""}
-      <div class="mkcap">Market Cap <span>${d.marketCap||"—"}</span></div>
-      <div class="exch-pill">${d.exchange||""}</div>
-    </div>
-    <div class="card">
-      <div class="ctitle">Фундаментальные показатели</div>
-      <div class="mets">
-        <div class="met"><div class="met-lbl">P/E TTM</div><div class="met-val">${fv(f.peTTM)}</div></div>
-        <div class="met"><div class="met-lbl">P/E Forward</div><div class="met-val">${fv(f.peFwd)}</div></div>
-        <div class="met"><div class="met-lbl">P/B</div><div class="met-val">${fv(f.pb)}</div></div>
-        <div class="met"><div class="met-lbl">EV/EBITDA</div><div class="met-val">${fv(f.evEbitda)}</div></div>
-        <div class="met"><div class="met-lbl">Div Yield</div><div class="met-val ${f.divYield>0?"pos":""}">${f.divYield!=null?f.divYield+"%":"—"}</div></div>
-        <div class="met"><div class="met-lbl">EPS TTM</div><div class="met-val">${f.epsTTM!=null?"$"+f.epsTTM:"—"}</div></div>
-        <div class="met"><div class="met-lbl">EPS Est ${new Date().getFullYear()}</div><div class="met-val">${f.epsThisYear!=null?"$"+f.epsThisYear:"—"}</div></div>
-        <div class="met"><div class="met-lbl">EPS Est ${new Date().getFullYear()+1}</div><div class="met-val pos">${f.epsNextYear!=null?"$"+f.epsNextYear:"—"}</div></div>
-        <div class="met"><div class="met-lbl">Rev Growth</div><div class="met-val ${f.revGrowth>0?"pos":"neg"}">${f.revGrowth!=null?f.revGrowth+"%":"—"}</div></div>
-        <div class="met"><div class="met-lbl">Gross Margin</div><div class="met-val">${f.grossMargin!=null?f.grossMargin+"%":"—"}</div></div>
-        <div class="met"><div class="met-lbl">Net Margin</div><div class="met-val">${f.netMargin!=null?f.netMargin+"%":"—"}</div></div>
-        <div class="met"><div class="met-lbl">Debt/Equity</div><div class="met-val ${f.debtEq>2?"neg":""}">${fv(f.debtEq)}</div></div>
-      </div>
-    </div>
-  </div>
-  <div class="row3">
-    <div class="card">
-      <div class="ctitle">Технический анализ</div>
-      <div class="rsi-big ${cls}">${t.rsi!=null?t.rsi:"—"}</div>
-      <div class="rsi-track"><div class="rsi-fill ${cls}" style="width:${t.rsi||0}%"></div></div>
-      <div class="rsi-row"><span>0 · Перепродан</span><span>Перекуплен · 100</span></div>
-      <span class="rsi-status ${cls}">${rl(t.rsi)}</span>
-      <div class="sig-list">${(t.signals||[]).map(sg=>`<span class="sig ${sc(sg)}">${sg}</span>`).join("")}</div>
-    </div>
-    <div class="card">
-      <div class="ctitle">Консенсус аналитиков</div>
-      <span class="con-pill ${(a.consensus||"Hold").replace(" ","")}">${a.consensus||"—"}</span>
-      <div class="con-bar">
-        <div class="con-buy" style="flex:${bp}"></div>
-        <div class="con-hold" style="flex:${hp}"></div>
-        <div class="con-sell" style="flex:${sp}"></div>
-      </div>
-      <div class="con-legend">
-        <div class="leg-item"><div class="leg-dot" style="background:var(--pos)"></div>Buy: ${a.buy??0}</div>
-        <div class="leg-item"><div class="leg-dot" style="background:var(--warn)"></div>Hold: ${a.hold??0}</div>
-        <div class="leg-item"><div class="leg-dot" style="background:var(--neg)"></div>Sell: ${a.sell??0}</div>
-      </div>
-      <div class="target-row">
-        <div><div class="target-lbl">Целевая цена 12м</div><div class="target-val">${a.target!=null?"$"+a.target:"—"}</div></div>
-        ${a.upside!=null?`<span class="upside-badge ${a.upside>=0?"pos":"neg"}">${a.upside>=0?"+":""}${a.upside}%</span>`:""}
-      </div>
-    </div>
-    <div class="card">
-      <div class="ctitle">Рыночный сентимент</div>
-      <div style="font-family:var(--mono);font-size:22px;font-weight:600;margin-bottom:12px;${s.newsScore>0.3?"color:var(--pos)":s.newsScore<-0.1?"color:var(--neg)":"color:var(--warn)"}">${s.newsLabel||"—"}</div>
-      <div style="display:flex;gap:10px;">
-        <div style="flex:1;background:var(--bg-el);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center;">
-          <div style="font-family:var(--mono);font-size:9px;color:var(--text-d);letter-spacing:1.5px;margin-bottom:5px;">NEWS SCORE</div>
-          <div style="font-family:var(--mono);font-size:15px;font-weight:600;${s.newsScore>0.3?"color:var(--pos)":s.newsScore<-0.1?"color:var(--neg)":"color:var(--warn)"}">
-            ${s.newsScore!=null?(s.newsScore>0?"+":"")+s.newsScore:"—"}</div>
-        </div>
-        <div style="flex:1;background:var(--bg-el);border:1px solid var(--border);border-radius:8px;padding:10px;text-align:center;">
-          <div style="font-family:var(--mono);font-size:9px;color:var(--text-d);letter-spacing:1.5px;margin-bottom:5px;">СОЦСЕТИ</div>
-          <div style="font-family:var(--mono);font-size:12px;color:var(--text-s);">${s.socialTrend||"—"}</div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="summ-card"><div class="ctitle">AI-резюме</div><div class="summ-txt">${d.summary||"—"}</div></div>`;
-  if((s.headlines||[]).length>0) h+=`<div class="card"><div class="ctitle">Последние новости</div>${s.headlines.map(hl=>`<div class="hline"><span class="hline-dot" style="${s.newsScore>0.3?"background:var(--pos)":"background:var(--warn)"}"></span>${hl}</div>`).join("")}</div>`;
-  document.getElementById("results").innerHTML=h;
-}
-
-// ──────────────────────────────────────────────
-// PORTFOLIO PHASE 2 (batched + retry + inline edit)
-// ──────────────────────────────────────────────
-const CLRS=["#3b82f6","#22c55e","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#f97316","#ec4899","#10b981","#84cc16","#e11d48","#0ea5e9","#7c3aed","#d946ef","#64748b","#a78bfa"];
-const SCLRS=["#3b82f6","#22c55e","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#f97316","#ec4899","#10b981","#84cc16"];
-let portfolio=[], donut=null;
-
-function addPos(){
-  const tk=document.getElementById("pf-tk").value.trim().toUpperCase(); if(!tk) return;
-  const nm=document.getElementById("pf-nm").value.trim()||tk;
-  const qty=parseFloat(document.getElementById("pf-qty").value)||0;
-  const avg=parseFloat(document.getElementById("pf-avg").value)||0;
-  const cur=parseFloat(document.getElementById("pf-cur").value)||avg;
-  const ccy=document.getElementById("pf-ccy").value||"USD";
-  portfolio.push({tk,nm,qty,avg,cur,ccy,divYield:null,sector:"—",priceFound:null,id:Date.now()});
-  ["pf-tk","pf-nm","pf-qty","pf-avg","pf-cur"].forEach(id=>document.getElementById(id).value="");
-  document.getElementById("pf-ccy").value="USD";
-  renderPF();
-  savePortfolio();
-}
-// Called from table buttons via global scope
-window.remPos = function(id){
-  portfolio=portfolio.filter(p=>p.id!==id);
-  renderPF(); savePortfolio();
-};
-
-let _editId = null;
-
-window.openModal = function(id){
-  const p = portfolio.find(x=>x.id===id); if(!p) return;
-  _editId = id;
-  document.getElementById('modal-tk').textContent = p.tk;
-  document.getElementById('modal-nm').textContent = p.nm !== p.tk ? p.nm : '';
-  document.getElementById('modal-qty').value = p.qty;
-  document.getElementById('modal-avg').value = p.avg || '';
-  document.getElementById('modal-cur').value = p.cur && p.cur !== p.avg ? p.cur : '';
-  document.getElementById('modal-nm-in').value = p.nm !== p.tk ? p.nm : '';
-  document.getElementById('modal-ccy').value = p.ccy || 'USD';
-  document.getElementById('edit-modal').style.display = 'flex';
-  setTimeout(()=>document.getElementById('modal-qty').focus(), 50);
-};
-
-function closeModal(){
-  document.getElementById('edit-modal').style.display = 'none';
-  _editId = null;
-}
-
-function saveModal(){
-  const p = portfolio.find(x=>x.id===_editId); if(!p) return;
-  const qty = parseFloat(document.getElementById('modal-qty').value);
-  const avg = parseFloat(document.getElementById('modal-avg').value);
-  const cur = parseFloat(document.getElementById('modal-cur').value);
-  const nm  = document.getElementById('modal-nm-in').value.trim();
-  const ccy = document.getElementById('modal-ccy').value;
-  if(!isNaN(qty) && qty >= 0) p.qty = qty;
-  if(!isNaN(avg) && avg >= 0) p.avg = avg;
-  if(!isNaN(cur) && cur > 0) p.cur = cur;
-  if(nm) p.nm = nm;
-  p.ccy = ccy;
-  p.priceFound = null; // reset badge
-  closeModal();
-  renderPF();
-  savePortfolio();
-}
-function deleteFromModal(){
-  if(_editId==null) return;
-  portfolio = portfolio.filter(p=>p.id!==_editId);
-  closeModal();
-  renderPF(); savePortfolio();
-}
-
-// Esc closes modal
-document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeModal(); });
-
-// Batch helper: split array into chunks
-function chunk(arr, size){ const r=[]; for(let i=0;i<arr.length;i+=size) r.push(arr.slice(i,i+size)); return r; }
-
-// API call with retry on 429
-async function callClaudeRetry(sys, msg, tokens=1000, retries=4){
-  for(let attempt=0; attempt<=retries; attempt++){
-    try {
-      return await callClaude(sys, msg, tokens);
-    } catch(e){
-      const is429 = e.message.includes("429");
-      if(is429 && attempt<retries){
-        // exponential backoff: 15s, 30s, 60s, 90s
-        const wait = [15000, 30000, 60000, 90000][attempt] || 90000;
-        const lbl = document.querySelector(".fp-lbl, #scr-fp-lbl, #sent-fp-lbl, #fp-lbl");
-        if(lbl) lbl.textContent=`Rate limit — жду ${wait/1000}с (попытка ${attempt+1}/${retries})...`;
-        await new Promise(r=>setTimeout(r,wait));
-      } else throw e;
-    }
-  }
-}
-
-async function fetchAllPrices(){
-  if(!portfolio.length) return;
-  const btn=document.getElementById("upd-btn");
-  btn.disabled=true; btn.classList.add("spinning");
-  const fpBar=document.getElementById("fp-bar"), fill=document.getElementById("fp-fill");
-  const fpLbl=document.getElementById("fp-lbl"), fpSub=document.getElementById("fp-sub");
-  fpBar.style.display="block"; fill.style.width="3%";
-
-  const BATCH_SIZE = 4; // max tickers per request to avoid 429
-  const batches = chunk(portfolio.map(p=>p.tk), BATCH_SIZE);
-  const mergedData = {};
-  const total = batches.length;
-
-  try {
-    for(let i=0; i<batches.length; i++){
-      const batch = batches[i];
-      fpLbl.textContent = `Батч ${i+1}/${total}: ${batch.join(", ")}`;
-      fpSub.textContent = `Всего тикеров: ${portfolio.length} · Размер батча: ${BATCH_SIZE}`;
-      fill.style.width = Math.round((i/total)*85+5)+"%";
-
-      const data = await callClaudeRetry(SYS_PRICES,
-        `Fetch current price, dividend yield and sector for EXACTLY these tickers: ${batch.join(", ")}`, 1000);
-      Object.assign(mergedData, data);
-
-      // Small delay between batches to be gentle on rate limits
-      if(i < batches.length-1) await new Promise(r=>setTimeout(r,6000));
-    }
-
-    fill.style.width="100%"; fpLbl.textContent="Обновляю портфель...";
-
-    portfolio.forEach(p=>{
-      const info = mergedData[p.tk]
-        || mergedData[p.tk.replace(".","")]
-        || mergedData[p.tk.split(".")[0]]
-        || mergedData[p.tk.replace(".SI","")]
-        || null;
-      if(info && info.price!=null){
-        p.cur = info.price;
-        p.priceFound = true;
-        if(info.divYield!=null) p.divYield = info.divYield;
-        if(info.sector) p.sector = info.sector;
-        if(info.currency) p.ccy = info.currency;
-        if(info.fxToUSD!=null) p.fxToUSD = info.fxToUSD;
-        if(info.name && p.nm===p.tk) p.nm = info.name;
-      } else {
-        p.priceFound = false;
-      }
-    });
-
-    const now=new Date();
-    document.getElementById("last-upd").textContent=
-      `Обновлено: ${now.toLocaleDateString("ru-RU")} ${now.toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"})}`;
-    renderPF();
-  } catch(e){
-    fpLbl.textContent="Ошибка: "+e.message;
-    fill.style.width="0%";
-  }
-  setTimeout(()=>{ fpBar.style.display="none"; fill.style.width="0%"; },3000);
-  btn.disabled=false; btn.classList.remove("spinning");
-}
-
-function renderPF(){
-  if(!portfolio.length){
-    ["pf-mv","pf-cost","pf-pnl","pf-div","pf-yield"].forEach(id=>{ document.getElementById(id).textContent="$0"; document.getElementById(id).className="pf-sval"; });
-    document.getElementById("pf-mv-sub").textContent="market value";
-    document.getElementById("pf-pnl-pct").textContent="0.00%";
-    document.getElementById("pf-div-mo").textContent="$0 / мес";
-    document.getElementById("pf-yield").textContent="0%";
-    document.getElementById("pf-count").textContent="0";
-    document.getElementById("pf-secs").textContent="0 секторов";
-    document.getElementById("pf-tbody").innerHTML="";
-    document.getElementById("pf-empty").style.display="block";
-    document.getElementById("charts-row").style.display="none";
-    return;
-  }
-  document.getElementById("pf-empty").style.display="none";
-
-  // fxToUSD: convert each position to USD for portfolio-level totals
-  // p.fxToUSD = rate to multiply local price by to get USD equivalent
-  // For positions where fxToUSD not yet fetched, use 1.0 (treated as USD)
-  const toUSD = p => (p.fxToUSD!=null ? p.fxToUSD : (p.ccy==='USD'?1.0:null));
-  const hasMixedCcy = portfolio.some(p=>p.ccy && p.ccy!=='USD');
-  const allHaveFX   = portfolio.every(p=>p.ccy==='USD'||(p.fxToUSD!=null));
-
-  // USD-equivalent values per position
-  const mvUSD  = p => p.qty * p.cur  * (toUSD(p)??1);
-  const avgUSD = p => p.qty * p.avg  * (toUSD(p)??1);
-
-  const totalMV   = portfolio.reduce((s,p)=>s+mvUSD(p),0);
-  const totalCost = portfolio.reduce((s,p)=>s+avgUSD(p),0);
-  const pnl  = totalMV-totalCost;
-  const pnlP = totalCost>0?(pnl/totalCost*100):0;
-  const totalDiv = portfolio.reduce((s,p)=>s+(p.divYield!=null ? mvUSD(p)*(p.divYield/100) : 0),0);
-  const wY = totalMV>0?(totalDiv/totalMV*100):0;
-
-  const fxNote = hasMixedCcy && !allHaveFX
-    ? ' <span style="font-size:10px;color:var(--warn);font-family:var(--mono)">⚠ нажми Обновить для FX-курсов</span>'
-    : (hasMixedCcy ? ' <span style="font-size:10px;color:var(--text-d);font-family:var(--mono)">≈USD</span>' : '');
-
-  document.getElementById("pf-mv").innerHTML="$"+fmt(totalMV)+fxNote;
-  document.getElementById("pf-mv-sub").textContent=portfolio.length+" позиций";
-  document.getElementById("pf-cost").innerHTML="$"+fmt(totalCost)+(hasMixedCcy?' <span style="font-size:10px;color:var(--text-d);font-family:var(--mono)">≈USD</span>':'');
-  const pnlEl=document.getElementById("pf-pnl");
-  pnlEl.innerHTML=(pnl>=0?"+$":"-$")+fmt(Math.abs(pnl))+(hasMixedCcy?' <span style="font-size:10px;color:var(--text-d);font-family:var(--mono)">≈USD</span>':'');
-  pnlEl.className="pf-sval "+(pnl>=0?"pos":"neg");
-  document.getElementById("pf-pnl-pct").textContent=(pnlP>=0?"+":"")+pnlP.toFixed(2)+"%";
-  document.getElementById("pf-div").textContent="$"+fmt(totalDiv);
-  document.getElementById("pf-div-mo").textContent="$"+fmt(totalDiv/12)+" / мес";
-  document.getElementById("pf-yield").textContent=wY.toFixed(2)+"%";
-  document.getElementById("pf-count").textContent=portfolio.length;
-
-  // Sectors — use USD-equivalent values
-  const secs={};
-  portfolio.forEach(p=>{ const k=p.sector||"—"; secs[k]=(secs[k]||0)+mvUSD(p); });
-  const secCount=Object.keys(secs).filter(s=>s!=="—").length;
-  document.getElementById("pf-secs").textContent=secCount+" секторов";
-
-  // Table — inline edit on qty and avg price cells (double-click)
-  const CCY_SYM = {USD:'$',SGD:'S$',EUR:'€',GBP:'£',HKD:'HK$',JPY:'¥',AUD:'A$',CAD:'C$'};
-  const tbody = document.getElementById("pf-tbody");
-  tbody.innerHTML = portfolio.map((p,i)=>{
-    const ccy = p.ccy||'USD';
-    const sym = CCY_SYM[ccy]||ccy+' ';
-    const mv=p.qty*p.cur, cost=p.qty*p.avg;       // in local currency
-    const mvU=mvUSD(p), costU=avgUSD(p);            // in USD equiv
-    const pl=mvU-costU, plP=costU>0?(pl/costU*100):0;
-    const di=p.divYield!=null?mvU*(p.divYield/100):null;
-    const wt=totalMV>0?(mvU/totalMV*100):0;
-    const col=CLRS[i%CLRS.length];
-    const notFound = p.priceFound===false;
-    const ndBadge = notFound ? `<span title="AI не нашёл данные. Проверь тикер или введи цену вручную." style="margin-left:5px;padding:1px 6px;border-radius:4px;background:rgba(245,158,11,.12);color:var(--warn);border:1px solid rgba(245,158,11,.25);font-family:var(--mono);font-size:9px;cursor:help;display:inline-block">⚠ нет данных</span>` : '';
-    return `<tr data-id="${p.id}">
-      <td class="tk-cell">${p.tk}${ndBadge}</td>
-      <td style="color:var(--text-s);font-size:11px;">${p.nm}</td>
-      <td><span class="sec-badge">${p.sector||"—"}</span></td>
-      <td class="r">${p.qty}</td>
-      <td class="r"><span style="font-family:var(--mono);font-size:10px;padding:1px 5px;background:var(--bg-el);border-radius:3px;color:var(--text-d)">${ccy}</span></td>
-      <td class="r">${p.avg ? sym+fmt(p.avg,2) : '<span style="color:var(--text-d)">—</span>'}</td>
-      <td class="r">${notFound ? '<span style="color:var(--warn);font-size:11px;">— обнови вручную</span>' : (p.cur ? sym+fmt(p.cur,2) : '<span style="color:var(--text-d)">—</span>')}</td>
-      <td class="r">${sym}${fmt(mv)}${(p.ccy&&p.ccy!=='USD'&&toUSD(p)) ? '<span style="color:var(--text-d);font-size:9px;margin-left:3px">≈$'+fmt(mvU)+'</span>' : ''}</td>
-      <td class="r ${pl>=0?"pnl-pos":"pnl-neg"}">${pl>=0?"+":"-"}$${fmt(Math.abs(pl))}</td>
-      <td class="r ${plP>=0?"pnl-pos":"pnl-neg"}">${plP>=0?"+":""}${plP.toFixed(1)}%</td>
-      <td class="r">${p.divYield!=null?`<span style="color:var(--pos)">${p.divYield}%</span>`:'<span style="color:var(--text-d)">—</span>'}</td>
-      <td class="r">${di!=null?`<span style="color:var(--pos)">$${fmt(di)}</span>`:'<span style="color:var(--text-d)">—</span>'}</td>
-      <td class="r pf-actions-cell">
-        <span style="display:inline-flex;align-items:center;gap:6px;justify-content:flex-end">
-          <span style="width:6px;height:6px;border-radius:50%;background:${col};display:inline-block;flex-shrink:0"></span>
-          <span style="font-family:var(--mono)">${wt.toFixed(1)}%</span>
-          <span class="row-actions">
-            <button class="edit-btn" title="Редактировать">✎</button>
-            <button class="del-btn" title="Удалить">×</button>
-          </span>
-        </span>
-      </td>
-
-    </tr>`;
-  }).join("");
-
-  // Attach button listeners after render
-  tbody.querySelectorAll(".del-btn").forEach(btn=>{
-    const id = parseInt(btn.closest("tr").dataset.id);
-    btn.addEventListener("click", e=>{ e.stopPropagation(); window.remPos(id); });
-  });
-  tbody.querySelectorAll(".edit-btn").forEach(btn=>{
-    const id = parseInt(btn.closest("tr").dataset.id);
-    btn.addEventListener("click", e=>{ e.stopPropagation(); window.openModal(id); });
-  });
-  // Click anywhere on row opens edit modal
-  tbody.querySelectorAll("tr").forEach(tr=>{
-    tr.style.cursor = "pointer";
-    tr.addEventListener("click", e=>{
-      if(e.target.closest(".edit-btn,.del-btn")) return;
-      const id = parseInt(tr.dataset.id);
-      window.openModal(id);
-    });
-  });
-
-  // Show charts
-  document.getElementById("charts-row").style.display="grid";
-  renderDonut(totalMV);
-  renderSectors(secs, totalMV);
-}
-
-function renderDonut(totalMV){
-  const labels=portfolio.map(p=>p.tk);
-  const vals=portfolio.map(p=>(mvUSD(p)/totalMV*100));
-  const colors=portfolio.map((_,i)=>CLRS[i%CLRS.length]);
-  if(donut) donut.destroy();
-  const ctx=document.getElementById("donut-chart").getContext("2d");
-  donut=new Chart(ctx,{
-    type:"doughnut",
-    data:{labels,datasets:[{data:vals,backgroundColor:colors,borderWidth:0,hoverOffset:6}]},
-    options:{plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.label}: ${c.raw.toFixed(1)}%`}}},cutout:"68%",animation:{duration:600}}
-  });
-  document.getElementById("dl-legend").innerHTML=portfolio.map((p,i)=>{
-    const wt=(mvUSD(p)/totalMV*100).toFixed(1);
-    return `<div class="dl-item"><span class="dl-dot" style="background:${CLRS[i%CLRS.length]}"></span><span class="dl-name">${p.tk}</span><span class="dl-wt">${wt}%</span></div>`;
-  }).join("");
-}
-
-function renderSectors(secs, totalMV){
-  const sorted=Object.entries(secs).sort((a,b)=>b[1]-a[1]);
-  document.getElementById("sec-list").innerHTML=sorted.map(([nm,val],i)=>{
-    const pct=(val/totalMV*100).toFixed(1);
-    return `<div class="sec-item">
-      <div class="sec-row"><span class="sec-name">${nm}</span><span class="sec-pct">${pct}%</span></div>
-      <div class="sec-track"><div class="sec-fill" style="width:${pct}%;background:${SCLRS[i%SCLRS.length]}"></div></div>
-    </div>`;
-  }).join("");
-}
-
-// ──────────────────────────────────────────────
-
-// ============================================================
-
-// ============================================================
-// SENTIMENT PHASE 4
-// ============================================================
-const SYS_SENTIMENT = `You are a financial sentiment analyst with live web search access. Search Reddit, financial news, and social media for current sentiment on the given ticker. CRITICAL: Return ONLY a single valid JSON object. No markdown, no backticks, no extra text. Keep all strings under 100 chars. Max 4 items per array. Schema (null for missing): {"ticker":"AAPL","name":"Apple Inc.","overallScore":72,"overallLabel":"Positive","newsScore":0.65,"redditScore":0.45,"institutionalScore":0.80,"trend":"Growing","trendDetail":"+34% this week","searchTrend":78,"mentionVelocity":"+23%","dominantEmotion":"Optimism","news":[{"headline":"Short headline","source":"Reuters","sentiment":"positive"},{"headline":"Headline 2","source":"Bloomberg","sentiment":"negative"}],"reddit":[{"title":"Post title","subreddit":"r/stocks","sentiment":"bullish","upvotes":"1.2k"},{"title":"Post 2","subreddit":"r/wsb","sentiment":"bearish","upvotes":"450"}],"catalysts":[{"event":"Catalyst description","timeframe":"Q2 2026","type":"positive"},{"event":"Risk event","timeframe":"3 months","type":"negative"}],"risks":[{"risk":"Risk description","level":"high"},{"risk":"Risk 2","level":"medium"}],"narrative":"2-3 sentences about current investor narrative."} Rules: overallScore 0-100. scores -1 to 1. news sentiment: positive/negative/neutral. reddit: bullish/bearish/neutral. risk: high/medium/low.`;
-
-const SYS_MACRO = `You are a macro market analyst with live web search access. Search for current macro data: fear/greed index, VIX, S&P 500, sector flows. CRITICAL: Return ONLY a single valid JSON object. No markdown, no backticks, no extra text. Strings under 80 chars. Max 6 sectors, 4 themes. Schema: {"fearGreed":62,"fearGreedLabel":"Greed","vix":18.5,"vixLabel":"Low volatility","spx500":{"level":5400,"changeWeek":1.2,"trend":"Uptrend"},"marketBreadth":"Broad rally","dominantNarrative":"One sentence market narrative.","sectors":[{"name":"Technology","score":78,"flow":"inflow"},{"name":"Energy","score":38,"flow":"outflow"},{"name":"Healthcare","score":55,"flow":"neutral"},{"name":"Financials","score":70,"flow":"inflow"},{"name":"Real Estate","score":32,"flow":"outflow"}],"topThemes":[{"theme":"AI spending boom","direction":"bullish"},{"theme":"Rate uncertainty","direction":"bearish"},{"theme":"Earnings growth","direction":"bullish"}],"macro_summary":"2-3 sentences about current market conditions and key risks."}`;
-
-async function runSentiment() {
-  const tk = document.getElementById('sent-in').value.trim().toUpperCase();
-  if (!tk) return;
-  const btn = document.getElementById('sent-btn');
-  btn.disabled = true; btn.textContent = 'Сканирую...';
-  showSentProgress(`Сканирую Reddit, новости и соцсети по ${tk}...`);
-  document.getElementById('sent-results').innerHTML = `<div class="loading"><div class="spin"></div><div class="load-txt">СКАНИРУЮ REDDIT · НОВОСТИ · НАРРАТИВ</div></div>`;
-  try {
-    const d = await callClaudeRetry(SYS_SENTIMENT, `Analyze social sentiment and news for: ${tk}`, 1500);
-    renderSentiment(d);
-  } catch(e) {
-    document.getElementById('sent-results').innerHTML = `<div class="err">&#9888; ${e.message}</div>`;
-  }
-  hideSentProgress();
-  btn.disabled = false; btn.textContent = '🔍 Анализировать сентимент';
-}
-
-async function runMacro() {
-  const btn = document.getElementById('macro-btn');
-  btn.disabled = true; btn.textContent = 'Загружаю...';
-  showSentProgress('Сканирую макро-индикаторы рынка...');
-  document.getElementById('sent-results').innerHTML = `<div class="loading"><div class="spin"></div><div class="load-txt">MACRO · VIX · FEAR&GREED · SECTOR ROTATION</div></div>`;
-  try {
-    const d = await callClaudeRetry(SYS_MACRO, 'Give me current macro market conditions, fear/greed index, VIX, and sector rotation data for today.', 1500);
-    renderMacro(d);
-  } catch(e) {
-    document.getElementById('sent-results').innerHTML = `<div class="err">&#9888; ${e.message}</div>`;
-  }
-  hideSentProgress();
-  btn.disabled = false; btn.textContent = '🌎 Макро-пульс рынка';
-}
-
-function showSentProgress(msg) {
-  const fp = document.getElementById('sent-fp');
-  document.getElementById('sent-fp-lbl').textContent = msg;
-  document.getElementById('sent-fp-sub').textContent = 'Поиск в реальном времени через AI + web_search';
-  fp.style.display = 'block';
-  let pct = 5;
-  window._sentInterval = setInterval(() => { pct = Math.min(pct + 4, 88); document.getElementById('sent-fp-fill').style.width = pct + '%'; }, 600);
-}
-function hideSentProgress() {
-  clearInterval(window._sentInterval);
-  document.getElementById('sent-fp-fill').style.width = '100%';
-  setTimeout(() => { document.getElementById('sent-fp').style.display = 'none'; document.getElementById('sent-fp-fill').style.width = '0%'; }, 1800);
-}
-
-function scoreColor(s) {
-  if (s >= 65) return 'var(--pos)';
-  if (s >= 40) return 'var(--warn)';
-  return 'var(--neg)';
-}
-function sentBadge(s) {
-  if (s === 'positive' || s === 'bullish') return 'pos';
-  if (s === 'negative' || s === 'bearish') return 'neg';
-  return 'neu';
-}
-function sentLabel(s) {
-  if (s === 'positive') return 'Позитив';
-  if (s === 'negative') return 'Негатив';
-  if (s === 'bullish') return 'Бычий';
-  if (s === 'bearish') return 'Медвежий';
-  return 'Нейтрал';
-}
-function riskIcon(l) { return l==='high'?'&#128308;':l==='medium'?'&#128992;':'&#128994;'; }
-function riskLbl(l) { return l==='high'?'Высокий риск':l==='medium'?'Средний риск':'Низкий риск'; }
-
-function scoreGauge(score, color) {
-  // SVG half-circle gauge
-  const angle = (score / 100) * 180;
-  const rad = (angle - 180) * Math.PI / 180;
-  const cx = 70, cy = 70, r = 55;
-  const x = cx + r * Math.cos(rad);
-  const y = cy + r * Math.sin(rad);
-  // Background arc: full half circle
-  // Foreground arc: up to score
-  const bgD = `M ${cx-r} ${cy} A ${r} ${r} 0 0 1 ${cx+r} ${cy}`;
-  // foreground arc
-  const large = angle > 90 ? 1 : 0;
-  const fgD = angle > 0 ? `M ${cx-r} ${cy} A ${r} ${r} 0 ${angle>=180?1:0} 1 ${x.toFixed(1)} ${y.toFixed(1)}` : '';
-  return `<svg width="140" height="80" viewBox="0 0 140 80">
-    <path d="${bgD}" fill="none" stroke="var(--bg-el)" stroke-width="10" stroke-linecap="round"/>
-    ${fgD ? `<path d="${fgD}" fill="none" stroke="${color}" stroke-width="10" stroke-linecap="round"/>` : ''}
-    <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" fill="${color}"/>
-  </svg>`;
-}
-
-function renderSentiment(d) {
-  const sc = d.overallScore ?? 50;
-  const col = scoreColor(sc);
-  const ns = d.newsScore ?? 0, rs = d.redditScore ?? 0, is_ = d.institutionalScore ?? 0;
-
-  let h = '';
-
-  // Top row: gauge + 3 sub-scores + trend
-  h += `<div style="display:grid;grid-template-columns:200px 1fr;gap:14px;margin-bottom:14px;">
-    <div class="card" style="display:flex;flex-direction:column;align-items:center;justify-content:center;">
-      <div class="ctitle" style="text-align:center;width:100%">Общий сентимент</div>
-      <div class="gauge-wrap">
-        <div class="gauge-arc">${scoreGauge(sc, col)}</div>
-        <div class="gauge-val" style="color:${col}">${sc}</div>
-        <div class="gauge-lbl">${d.overallLabel || '—'}</div>
-      </div>
-    </div>
-    <div style="display:grid;grid-template-rows:1fr 1fr 1fr;gap:10px;">
-      ${[
-        {label:'Новостной сентимент', val: ns, pct: Math.round((ns+1)/2*100)},
-        {label:'Reddit / Соцсети', val: rs, pct: Math.round((rs+1)/2*100)},
-        {label:'Институциональный', val: is_, pct: Math.round((is_+1)/2*100)},
-      ].map(x => {
-        const c2 = x.pct >= 60 ? 'var(--pos)' : x.pct <= 40 ? 'var(--neg)' : 'var(--warn)';
-        const sign = x.val >= 0 ? '+' : '';
-        return `<div class="card" style="padding:14px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <span style="font-family:var(--mono);font-size:9px;color:var(--text-d);letter-spacing:2px;text-transform:uppercase;">${x.label}</span>
-            <span style="font-family:var(--mono);font-size:14px;font-weight:600;color:${c2}">${sign}${x.val.toFixed(2)}</span>
-          </div>
-          <div class="score-bar"><div class="score-fill" style="width:${x.pct}%;background:${c2}"></div></div>
-        </div>`;
-      }).join('')}
-    </div>
-  </div>`;
-
-  // Trend bar
-  h += `<div class="card" style="margin-bottom:14px;padding:14px 20px;">
-    <div style="display:flex;gap:32px;flex-wrap:wrap;">
-      <div><div class="ctitle" style="margin-bottom:6px;">Тренд интереса</div><div style="font-family:var(--mono);font-size:16px;font-weight:600;color:var(--accent)">${d.trend || '—'}</div><div style="font-size:12px;color:var(--text-d);margin-top:3px">${d.trendDetail || ''}</div></div>
-      <div><div class="ctitle" style="margin-bottom:6px;">Google Trends Score</div><div style="font-family:var(--mono);font-size:16px;font-weight:600;color:var(--text)">${d.searchTrend ?? '—'}<span style="font-size:11px;color:var(--text-d)">/100</span></div></div>
-      <div><div class="ctitle" style="margin-bottom:6px;">Velocity упоминаний</div><div style="font-family:var(--mono);font-size:16px;font-weight:600;${d.mentionVelocity && d.mentionVelocity.startsWith('+')?'color:var(--pos)':'color:var(--neg)'}">${d.mentionVelocity || '—'}</div></div>
-      <div><div class="ctitle" style="margin-bottom:6px;">Доминирующая эмоция</div><div style="font-family:var(--mono);font-size:16px;font-weight:600;color:var(--warn)">${d.dominantEmotion || '—'}</div></div>
-    </div>
-  </div>`;
-
-  // News + Reddit
-  h += `<div class="sent-grid" style="margin-bottom:14px;">
-    <div class="card">
-      <div class="ctitle">Последние новости (${(d.news||[]).length})</div>
-      ${(d.news||[]).map(n => `<div class="news-item">
-        <div class="news-headline">${n.headline}</div>
-        <div class="news-meta">
-          <span class="news-src">${n.source||''}</span>
-          <span class="news-badge ${sentBadge(n.sentiment)}">${sentLabel(n.sentiment)}</span>
-          ${n.summary ? `<span style="font-size:11px;color:var(--text-d);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${n.summary}</span>` : ''}
-        </div>
-      </div>`).join('') || '<div style="color:var(--text-d);font-family:var(--mono);font-size:12px;padding:16px 0">Нет данных</div>'}
-    </div>
-    <div class="card">
-      <div class="ctitle">Reddit / Соцсети (${(d.reddit||[]).length})</div>
-      ${(d.reddit||[]).map(r => `<div class="reddit-item ${sentBadge(r.sentiment)}">
-        <div class="reddit-title">${r.title}</div>
-        <div class="reddit-meta">${r.subreddit} &nbsp;·&nbsp; ${r.upvotes||''} upvotes &nbsp;·&nbsp; <span style="color:${r.sentiment==='bullish'?'var(--pos)':'var(--neg)'}">${sentLabel(r.sentiment)}</span></div>
-        ${r.summary ? `<div style="font-size:11px;color:var(--text-d);margin-top:4px">${r.summary}</div>` : ''}
-      </div>`).join('') || '<div style="color:var(--text-d);font-family:var(--mono);font-size:12px;padding:16px 0">Нет данных</div>'}
-    </div>
-  </div>`;
-
-  // Catalysts + Risks
-  h += `<div class="sent-grid" style="margin-bottom:14px;">
-    <div class="card">
-      <div class="ctitle">Катализаторы</div>
-      ${(d.catalysts||[]).map(c => `<div class="catalyst-item">
-        <div class="catalyst-icon">${c.type==='positive'?'&#128994;':'&#128308;'}</div>
-        <div><div class="catalyst-text">${c.event}</div><div class="catalyst-time">${c.timeframe||''}</div></div>
-      </div>`).join('') || '<div style="color:var(--text-d);font-family:var(--mono);font-size:12px;padding:12px 0">Нет данных</div>'}
-    </div>
-    <div class="card">
-      <div class="ctitle">Ключевые риски</div>
-      ${(d.risks||[]).map(r => `<div class="risk-item">
-        <div class="risk-icon">${riskIcon(r.level)}</div>
-        <div><div class="risk-text">${r.risk}</div><div class="risk-level ${r.level==='high'?'high':r.level==='medium'?'med':'low'}">${riskLbl(r.level)}</div></div>
-      </div>`).join('') || '<div style="color:var(--text-d);font-family:var(--mono);font-size:12px;padding:12px 0">Нет данных</div>'}
-    </div>
-  </div>`;
-
-  // Narrative
-  h += `<div class="narrative-card">
-    <div class="ctitle">AI-нарратив</div>
-    <div class="narrative-txt">${d.narrative || '—'}</div>
-  </div>`;
-
-  document.getElementById('sent-results').innerHTML = h;
-}
-
-function renderMacro(d) {
-  const fgCol = d.fearGreed >= 60 ? 'var(--pos)' : d.fearGreed <= 40 ? 'var(--neg)' : 'var(--warn)';
-  const vixCol = (d.vix||0) < 18 ? 'var(--pos)' : (d.vix||0) > 28 ? 'var(--neg)' : 'var(--warn)';
-
-  let h = '';
-
-  // 4 macro stats
-  h += `<div class="macro-row">
-    <div class="macro-stat">
-      <div class="macro-lbl">Fear & Greed</div>
-      <div class="macro-val" style="color:${fgCol}">${d.fearGreed ?? '—'}</div>
-      <div class="macro-sub">${d.fearGreedLabel || ''}</div>
-    </div>
-    <div class="macro-stat">
-      <div class="macro-lbl">VIX</div>
-      <div class="macro-val" style="color:${vixCol}">${d.vix ?? '—'}</div>
-      <div class="macro-sub">${d.vixLabel || ''}</div>
-    </div>
-    <div class="macro-stat">
-      <div class="macro-lbl">S&P 500</div>
-      <div class="macro-val">${d.spx500?.level?.toLocaleString() ?? '—'}</div>
-      <div class="macro-sub" style="color:${(d.spx500?.changeWeek||0)>=0?'var(--pos)':'var(--neg)'}">
-        ${d.spx500?.changeWeek != null ? (d.spx500.changeWeek>=0?'+':'')+d.spx500.changeWeek+'% неделя' : ''}
-      </div>
-    </div>
-    <div class="macro-stat">
-      <div class="macro-lbl">Market Breadth</div>
-      <div class="macro-val" style="font-size:14px;padding-top:4px">${d.marketBreadth || '—'}</div>
-      <div class="macro-sub">${d.spx500?.trend || ''}</div>
-    </div>
-  </div>`;
-
-  // Sector rotation
-  const sectors = d.sectors || [];
-  h += `<div class="sent-grid" style="margin-bottom:14px;">
-    <div class="card">
-      <div class="ctitle">Секторная ротация</div>
-      ${sectors.map(s => {
-        const sc2 = s.score ?? 50;
-        const col2 = sc2 >= 65 ? 'var(--pos)' : sc2 <= 40 ? 'var(--neg)' : 'var(--warn)';
-        const flowTxt = s.flow === 'inflow' ? '&#8593; приток' : s.flow === 'outflow' ? '&#8595; отток' : '&#8594; нейтрально';
-        const flowCol = s.flow === 'inflow' ? 'var(--pos)' : s.flow === 'outflow' ? 'var(--neg)' : 'var(--text-d)';
-        return `<div class="trend-row">
-          <span class="trend-label">${s.name}</span>
-          <span style="font-family:var(--mono);font-size:10px;color:${flowCol}">${flowTxt}</span>
-          <span style="font-family:var(--mono);font-size:12px;color:${col2};margin-left:8px">${sc2}</span>
-          <div class="trend-bar-wrap"><div class="trend-bar-fill" style="width:${sc2}%;background:${col2}"></div></div>
-        </div>`;
-      }).join('') || '<div style="color:var(--text-d);font-family:var(--mono);font-size:12px;padding:12px 0">Нет данных</div>'}
-    </div>
-    <div class="card">
-      <div class="ctitle">Топ нарративы рынка</div>
-      ${(d.topThemes||[]).map(t => `<div class="trend-row">
-        <span class="trend-label" style="flex:1">${t.theme}</span>
-        <span class="news-badge ${t.direction==='bullish'?'pos':t.direction==='bearish'?'neg':'neu'}">${t.direction==='bullish'?'Бычий':t.direction==='bearish'?'Медвежий':'Нейтрал'}</span>
-      </div>`).join('') || '<div style="color:var(--text-d);font-family:var(--mono);font-size:12px;padding:12px 0">Нет данных</div>'}
-      ${d.dominantNarrative ? `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);font-size:12px;color:var(--text-d);line-height:1.6">${d.dominantNarrative}</div>` : ''}
-    </div>
-  </div>`;
-
-  // Summary
-  if (d.macro_summary) {
-    h += `<div class="narrative-card"><div class="ctitle">AI-резюме рынка</div><div class="narrative-txt">${d.macro_summary}</div></div>`;
-  }
-
-  document.getElementById('sent-results').innerHTML = h;
-}
-
-// SCREENER PHASE 3
-// ============================================================
-const SYS_SCREENER = `You are a financial data analyst with live web search access. Search for current financial data for the given tickers. CRITICAL: Return ONLY a single compact JSON object. No markdown, no backticks, no text before or after the JSON. Use null for missing fields. Put each ticker on one line. Schema: {"TICKER":{"name":"Full Name","sector":"Technology","price":185.5,"marketCap":"2.87T","peTTM":28.5,"peFwd":25.1,"pb":45.2,"evEbitda":22.1,"divYield":0.52,"epsTTM":6.51,"epsGrowthYoY":8.2,"epsNextYear":7.82,"revenueGrowth":5.1,"grossMargin":46.2,"netMargin":26.4,"roe":147.2,"debtEq":1.45,"rsi":58.3,"analystConsensus":"Buy","analystTarget":210.0,"upside":13.2,"score":72}} score=overall quality 0-100. sector: Technology/Healthcare/Financials/Real Estate/Energy/Utilities/Consumer Staples/Consumer Discretionary/Industrials/Materials/Communication/Crypto/ETF Index/Other. analystConsensus: Buy/Hold/Sell or null.`;
-
-let scrData = [], scrSortCol = null, scrSortDir = 1, scrGroup = 'all';
-
-const SCR_COLS = [
-  { key:'price',       label:'Цена',         fmt:v=>v!=null?'$'+v.toLocaleString():null, desc:false },
-  { key:'marketCap',   label:'Mkt Cap',      fmt:v=>v,                                   desc:false },
-  { key:'score',       label:'Score',        fmt:v=>v!=null?v+'/100':null,               desc:true, highlight:true },
-  { key:'peTTM',       label:'P/E TTM',      fmt:v=>v,                                   desc:false, bar:'pe' },
-  { key:'peFwd',       label:'P/E Fwd',      fmt:v=>v,                                   desc:false, bar:'pe' },
-  { key:'pb',          label:'P/B',          fmt:v=>v,                                   desc:false },
-  { key:'evEbitda',    label:'EV/EBITDA',    fmt:v=>v,                                   desc:false },
-  { key:'divYield',    label:'Div Yield',    fmt:v=>v!=null?v+'%':null,                  desc:true, pos:true },
-  { key:'epsTTM',      label:'EPS TTM',      fmt:v=>v!=null?'$'+v:null,                  desc:true },
-  { key:'epsGrowthYoY',label:'EPS Gr YoY',   fmt:v=>v!=null?v+'%':null,                  desc:true, pos:true, bar:'pct' },
-  { key:'epsNextYear', label:'EPS Next Yr',  fmt:v=>v!=null?'$'+v:null,                  desc:true },
-  { key:'revenueGrowth',label:'Rev Growth',  fmt:v=>v!=null?v+'%':null,                  desc:true, pos:true },
-  { key:'grossMargin', label:'Gross Mgn',    fmt:v=>v!=null?v+'%':null,                  desc:true, pos:true, bar:'pct' },
-  { key:'netMargin',   label:'Net Mgn',      fmt:v=>v!=null?v+'%':null,                  desc:true, pos:true },
-  { key:'roe',         label:'ROE',          fmt:v=>v!=null?v+'%':null,                  desc:true, pos:true },
-  { key:'debtEq',      label:'Debt/Eq',      fmt:v=>v,                                   desc:false },
-  { key:'rsi',         label:'RSI',          fmt:v=>v,                                   desc:false },
-  { key:'analystConsensus', label:'Консенсус', fmt:v=>v,                                 desc:false },
-  { key:'upside',      label:'Upside',       fmt:v=>v!=null?v+'%':null,                  desc:true, pos:true },
-];
-
-const SCR_GROUPS = {
-  all:     { label:'Все метрики', keys: null },
-  val:     { label:'Оценка', keys: ['price','marketCap','peTTM','peFwd','pb','evEbitda'] },
-  growth:  { label:'Рост', keys: ['epsGrowthYoY','epsNextYear','revenueGrowth'] },
-  quality: { label:'Качество', keys: ['grossMargin','netMargin','roe','debtEq'] },
-  income:  { label:'Дивиденды', keys: ['divYield'] },
-  tech:    { label:'Технический', keys: ['rsi','analystConsensus','upside','score'] },
-};
-
-function setPreset(tickers){ document.getElementById('scr-in').value=tickers; }
-
-function parseTickers(raw){
-  return [...new Set(raw.split(/[\s,;]+/).map(s=>s.trim().toUpperCase()).filter(Boolean))].slice(0,12);
 }
 
 async function runScreener(){
@@ -1621,6 +993,65 @@ function scrSort(key){
 
 
 // ── PORTFOLIO PERSISTENCE ──
+
+async function fetchAllPrices(){
+  if(!portfolio.length) return;
+  const btn = document.getElementById("upd-btn");
+  btn.disabled = true; btn.classList.add("spinning");
+  const fpBar = document.getElementById("fp-bar");
+  const fill  = document.getElementById("fp-fill");
+  const fpLbl = document.getElementById("fp-lbl");
+  const fpSub = document.getElementById("fp-sub");
+  fpBar.style.display = "block"; fill.style.width = "10%";
+
+  const tickers = portfolio.map(p => p.tk);
+  fpLbl.textContent = "Yahoo Finance: " + tickers.join(", ");
+  fpSub.textContent = "Получаю реальные цены...";
+
+  try {
+    const token = localStorage.getItem('sm_token');
+    fill.style.width = "50%";
+    const r = await fetch('/api/yahoo/prices/' + tickers.join(','), {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    fill.style.width = "90%";
+    if (!r.ok) throw new Error('Yahoo Finance error: ' + r.status);
+    const data = await r.json();
+
+    portfolio.forEach(p => {
+      const info = data[p.tk] || null;
+      if (info && info.price != null) {
+        p.cur = info.price;
+        p.priceFound = true;
+        if (info.divYield != null) p.divYield = info.divYield;
+        if (info.sector)   p.sector = info.sector;
+        if (info.currency) p.ccy = info.currency;
+        if (info.name && p.nm === p.tk) p.nm = info.name;
+      } else {
+        p.priceFound = false;
+      }
+    });
+
+    fill.style.width = "100%";
+    const found = tickers.filter(t => data[t]?.price).length;
+    fpLbl.textContent = "Готово: " + found + "/" + tickers.length + " тикеров обновлено";
+    fpSub.textContent = "Источник: Yahoo Finance (реальные данные)";
+
+    const now = new Date();
+    document.getElementById("last-upd").textContent =
+      "Обновлено: " + now.toLocaleDateString("ru-RU") + " " +
+      now.toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"});
+    renderPF();
+    savePortfolio();
+  } catch(e) {
+    fpLbl.textContent = "Ошибка: " + e.message;
+    fill.style.width = "0%";
+  }
+
+  setTimeout(() => { fpBar.style.display = "none"; fill.style.width = "0%"; }, 3000);
+  btn.disabled = false; btn.classList.remove("spinning");
+}
+
 async function savePortfolio() {
   const token = localStorage.getItem('sm_token');
   if (!token) return;
